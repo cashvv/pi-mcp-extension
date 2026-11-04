@@ -6,6 +6,12 @@ Instructions for AI coding agents (Pi, Claude Code, OpenCode, Codex, Cursor, Ant
 
 For a behavioral overview of how the runtime fits together (lifecycle, coordination, config trust, and credential storage), see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The *Repository map* below names every module.
 
+## This fork (cashvv)
+
+This is the owner's fork of upstream `irahardianto/pi-mcp-extension`. Work goes through task branches merged into `develop`; `main` changes only through squash-merged pull requests.
+
+**How it is installed:** `~/.pi/agent/extensions/pi-mcp` is a symlink to the clone `~/pi-mcp-extension`, which stays on `develop`. Pi loads `src/index.ts` from the clone, so a change is live once it is merged into `develop` there — nothing is copied. Running Pi sessions keep the code they loaded; new threads get the new code. `node_modules` comes from `npm ci` in the clone; Pi's own packages are aliased to the host by Pi's loader, so only the MCP SDK and zod resolve from the clone.
+
 ## Commands
 
 ```bash
