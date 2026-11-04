@@ -47,7 +47,8 @@ Semgrep and ESLint enforce several of these rules. Suppress a finding only with 
 
 | File | Owns |
 |---|---|
-| `src/index.ts` | Extension entry (default export); `session_start` / `session_shutdown`; file-level config provenance tracking; `mcp_status`, `mcp_connect`, `mcp_list_resources`, and `mcp_read_resource` tools |
+| `src/index.ts` | Extension entry (default export); `session_start` / `session_shutdown` / turn and usage tracking for idle eviction; file-level config provenance tracking; `mcp_status`, `mcp_connect`, `mcp_disconnect`, `mcp_list_resources`, and `mcp_read_resource` tools |
+| `src/idle-stop.ts` | Pure idle-eviction policy: turn counter, per-server last-use, first-sight credit, `IDLE_STOP_TURNS` selection |
 | `src/register-commands.ts` | Pi `/mcp`, `/mcp:start`, `/mcp:stop`, `/mcp:auth`, and `/mcp:resources` slash-command registration (`registerCommands`), including the enriched `/mcp <name>` detail view |
 | `src/connection-coordinator.ts` | Connection and auth coordination (`ConnectionCoordinator`: in-flight `connectAttempts`, `authQueue`, eager server starts, session teardown) |
 | `src/startup-auth.ts` | Abort-aware auth-queue turn waiter (`waitForQueueTurn`), startup authorization prompt (`promptStartupAuth`, `startupAuthNowOption`, `startupAuthLaterOption`), and error message formatting (`formatErrorMessage`) |

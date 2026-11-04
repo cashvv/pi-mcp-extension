@@ -318,6 +318,15 @@ export class ToolBridge {
     return { discovered: names.size, active: [...names].filter((name) => active.has(name)).length };
   }
 
+  /**
+   * Owner server of a registered Pi tool name, if any. Control tools
+   * (`mcp_status`, `mcp_connect`, …) are registered directly with Pi, not
+   * through the bridge, so they never resolve to a server here.
+   */
+  getServerForTool(toolName: string): string | null {
+    return this.toolOwners.get(toolName) ?? null;
+  }
+
   /** Deactivate all Pi tools belonging to a server (called on disconnect). */
   deactivateServer(serverName: string): void {
     this._bumpRefreshGeneration(serverName);

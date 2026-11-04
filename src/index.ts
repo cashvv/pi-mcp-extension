@@ -52,6 +52,13 @@ import {
   formatErrorMessage,
 } from "./connection-coordinator.js";
 import { CallbackServer } from "./callback-server.js";
+import {
+  createIdleStopState,
+  recordSeen,
+  recordTurn,
+  recordUse,
+  selectIdleServers,
+} from "./idle-stop.js";
 import { authorize as runAuthorize } from "./authorize-flow.js";
 import {
   DebugLog,
@@ -69,6 +76,15 @@ export {
 } from "./connection-coordinator.js";
 
 const DEFAULT_SETTINGS = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 } as const;
+
+/** Best-effort string field of a tool_call input (unknown shape is "not used"). */
+function inputString(input: unknown, key: string): string {
+  if (typeof input !== "object" || input === null) {
+    return "";
+  }
+  const raw = (input as Record<string, unknown>)[key];
+  return typeof raw === "string" ? raw : "";
+}
 
 export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string; globalConfigPath?: string; authStorageDir?: string; browserOpen?: (url: string) => void | Promise<void>; callbackServer?: CallbackServer } = {}): Promise<void> {
   // ── 0. Opt-in diagnostic log ───────────────────────────────────────────────
@@ -364,6 +380,38 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
     await getDebugLog()?.flush();
   });
 
+  // ── 3b. Idle eviction of unused servers ──────────────────────────────────
+  // WHY: a connected server costs context on every request and, for stdio, a
+  // live process tree. Turns and usage are global (the manager is shared by all
+  // sessions), so idle means idle everywhere. Stopping goes through the same
+  // recipe as /mcp:stop, which marks the stop deliberate — no _recover()
+  // respawn — and unloads the tools from every session at once. Eager servers
+  // obey the same rule; session_start restarts them (their lifecycle promise).
+  const idle = createIdleStopState();
+  pi.on("tool_call", (event) => {
+    const name = event.toolName;
+    if (name === "mcp_connect" || name === "mcp_read_resource") {
+      recordUse(idle, inputString(event.input, name === "mcp_connect" ? "name" : "server"));
+      return undefined;
+    }
+    const owner = bridge.getServerForTool(name);
+    if (owner !== null) {
+      recordUse(idle, owner);
+    }
+    return undefined;
+  });
+  pi.on("before_agent_start", async (_event, ctx) => {
+    recordTurn(idle);
+    const ready = manager.getReadyServers().map((server) => server.name);
+    recordSeen(idle, ready);
+    for (const name of selectIdleServers(idle, ready)) {
+      coordinator.cancelServer(name);
+      coordinator.syncStatus(ctx);
+      bridge.deactivateServer(name);
+      await manager.stopServer(name);
+    }
+  });
+
   // ── 4. Slash commands ───────────────────────────────────────────────────
   const getProvenance = (): ConfigProvenance =>
     withExtensionServers(fileProvenance, Object.keys(extensionServers));
@@ -393,6 +441,38 @@ interface ManagementToolDeps {
   bridge: ToolBridge;
   resources: ResourceBridge;
   getProvenance: () => ConfigProvenance;
+}
+
+/** Model-initiated unload of one server (the tool-call twin of `/mcp:stop`). */
+async function disconnectServer(
+  deps: ManagementToolDeps,
+  name: string,
+  ctx: ExtensionContext,
+): Promise<{ content: [{ type: "text"; text: string }]; details: Record<string, never> }> {
+  const { manager, coordinator, bridge } = deps;
+  if (!manager.getServer(name)) {
+    throw new Error("Unknown MCP server name. Use mcp_status to list configured servers.");
+  }
+  coordinator.cancelServer(name);
+  coordinator.syncStatus(ctx);
+  bridge.deactivateServer(name);
+  await manager.stopServer(name);
+  return { content: [{ type: "text", text: `MCP server ${name} disconnected; tools unloaded.` }], details: {} };
+}
+
+function registerDisconnectTool(pi: ExtensionAPI, deps: ManagementToolDeps): void {
+  pi.registerTool({
+    name: "mcp_disconnect",
+    label: "Disconnect MCP server",
+    description: "Disconnect a connected MCP server and unload its tools to save context. Reconnect anytime with mcp_connect.",
+    promptSnippet: "Disconnect a connected MCP server and unload its tools; reconnect with mcp_connect when needed again.",
+    parameters: Type.Object({
+      name: Type.String({ description: "Exact configured MCP server name" }),
+    }),
+    async execute(_id, { name }, _signal, _update, ctx) {
+      return disconnectServer(deps, name, ctx);
+    },
+  });
 }
 
 /** One `mcp_status` row: state, tool counts, credential summary, error hint, and config source. */
@@ -494,6 +574,8 @@ function registerManagementTools(
       return { content: [{ type: "text", text: `MCP server ${name} ready; tools discovered and active.` }], details: {} };
     },
   });
+
+  registerDisconnectTool(pi, deps);
 
   pi.registerTool({
     name: "mcp_list_resources",
