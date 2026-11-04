@@ -57,6 +57,7 @@ import {
   recordSeen,
   recordTurn,
   recordUse,
+  forgetServer,
   selectIdleServers,
 } from "./idle-stop.js";
 import { authorize as runAuthorize } from "./authorize-flow.js";
@@ -181,9 +182,13 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
       },
     );
   });
+  const idle = createIdleStopState();
   manager.setServerStoppedCallback((name) => {
     bridge.deactivateServer(name);
     resources.forget(name);
+    // WHY: a server started again (/mcp:start, /mcp:auth) must get a fresh first sight,
+    // not its stale last use — otherwise it is stopped again on the next turn.
+    forgetServer(idle, name);
   });
   manager.setRecoveryFailedCallback((serverName, error) => {
     coordinator.handleRecoveryFailed(serverName, error);
@@ -382,12 +387,10 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
 
   // ── 3b. Idle eviction of unused servers ──────────────────────────────────
   // WHY: a connected server costs context on every request and, for stdio, a
-  // live process tree. Turns and usage are global (the manager is shared by all
-  // sessions), so idle means idle everywhere. Stopping goes through the same
-  // recipe as /mcp:stop, which marks the stop deliberate — no _recover()
-  // respawn — and unloads the tools from every session at once. Eager servers
-  // obey the same rule; session_start restarts them (their lifecycle promise).
-  const idle = createIdleStopState();
+  // live process tree. Turns and usage are per session (pi loads extensions per
+  // session runtime). Stopping goes through the same recipe as /mcp:stop, which
+  // marks the stop deliberate — no _recover() respawn. Eager servers obey the
+  // same rule and stay stopped until mcp_connect or a new session.
   pi.on("tool_call", (event) => {
     const name = event.toolName;
     if (name === "mcp_connect" || name === "mcp_read_resource") {
@@ -469,6 +472,8 @@ function registerDisconnectTool(pi: ExtensionAPI, deps: ManagementToolDeps): voi
     parameters: Type.Object({
       name: Type.String({ description: "Exact configured MCP server name" }),
     }),
+    // WHY: a parallel batch could stop a server while a sibling call to it is in flight.
+    executionMode: "sequential",
     async execute(_id, { name }, _signal, _update, ctx) {
       return disconnectServer(deps, name, ctx);
     },

@@ -6,16 +6,20 @@
  * neither should linger: after {@link IDLE_STOP_TURNS} turns without a single
  * use, the wiring in `src/index.ts` stops the server through the same recipe as
  * `/mcp:stop` (`cancelServer` + `deactivateServer` + `manager.stopServer`), so
- * the state machine marks the stop deliberate — no `_recover()` respawn — and
- * the tools unload from every session at once.
+ * the state machine marks the stop deliberate — no `_recover()` respawn.
+ *
+ * pi loads extensions per session runtime (`moduleCache: false`), so each
+ * session has its own manager, server processes and idle state.
  *
  * Rules:
- * - a turn is one `before_agent_start` in any session (the manager is global,
- *   so turns and usage are global too: idle means idle everywhere);
+ * - a turn is one `before_agent_start` of this session (a user prompt);
  * - a use is any `tool_call` of the server's tools, `mcp_connect` (its `name`
  *   input), or `mcp_read_resource` (its `server` input);
  * - servers whose tools appear without a recorded use count as used at first
  *   sight (eager starts and `/mcp:start` never pass through `mcp_connect`);
+ * - a server that is not `ready` at a turn is forgotten, so a server started
+ *   again after a stop (`/mcp:start`, `/mcp:auth`, lazy reconnect) gets a fresh
+ *   first sight instead of its stale last use;
  * - only `ready` servers are stopped; `starting`/`stopped` are left alone.
  */
 export const IDLE_STOP_TURNS = 10;
@@ -40,11 +44,19 @@ export function recordUse(state: IdleStopState, server: string): void {
 }
 
 export function recordSeen(state: IdleStopState, servers: readonly string[]): void {
+  for (const known of [...state.lastUsed.keys()]) {
+    if (!servers.includes(known)) state.lastUsed.delete(known);
+  }
   for (const server of servers) {
     if (!state.lastUsed.has(server)) {
       state.lastUsed.set(server, state.turn);
     }
   }
+}
+
+/** A stopped server (any path: idle, /mcp:stop, mcp_disconnect, shutdown) loses its last use. */
+export function forgetServer(state: IdleStopState, server: string): void {
+  state.lastUsed.delete(server);
 }
 
 export function selectIdleServers(

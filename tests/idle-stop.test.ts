@@ -61,6 +61,27 @@ describe("idle-stop decision", () => {
     recordTurn(state);
     assert.deepEqual(selectIdleServers(state, ["lazy"]), ["lazy"]);
   });
+
+  it("a server that left ready is forgotten and gets a fresh first sight", () => {
+    const state = createIdleStopState();
+    recordSeen(state, ["github"]);
+    for (let index = 0; index < 11; index += 1) {
+      recordTurn(state);
+    }
+    assert.deepEqual(selectIdleServers(state, ["github"]), ["github"]);
+    // stopped: not ready at the next turn
+    recordTurn(state);
+    recordSeen(state, []);
+    // started again without a tool call (/mcp:start, /mcp:auth)
+    recordTurn(state);
+    recordSeen(state, ["github"]);
+    for (let index = 0; index < 10; index += 1) {
+      recordTurn(state);
+      assert.deepEqual(selectIdleServers(state, ["github"]), [], `turn ${index}`);
+    }
+    recordTurn(state);
+    assert.deepEqual(selectIdleServers(state, ["github"]), ["github"]);
+  });
 });
 
 const mockServer = join(dirname(fileURLToPath(import.meta.url)), "mock-server.ts");
@@ -131,6 +152,28 @@ describe("idle eviction wiring", () => {
       assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
       await useTool({ toolName: "mcp_read_resource", input: { server: "lazy", uri: "mock://docs/readme" } }, ctx);
       await turns(mockExt, ctx, 10);
+      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
+      await turns(mockExt, ctx, 1);
+      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "stopped");
+    } finally {
+      await mockExt.events.get("session_shutdown")?.({}, ctx);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a server started again after an idle stop gets 10 more turns", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-mcp-idle-restart-"));
+    const { mockExt, ctx } = await loadWithLazyServer(dir);
+    try {
+      const connect = () => mockExt.tools.get("mcp_connect").execute("", { name: "lazy" }, undefined, undefined, ctx);
+      await connect();
+      await turns(mockExt, ctx, 12);
+      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "stopped");
+      // like /mcp:start: no tool_call event reaches the idle counter
+      await connect();
+      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
+      // the first turn that sees it again counts as its use, then 10 idle turns
+      await turns(mockExt, ctx, 11);
       assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
       await turns(mockExt, ctx, 1);
       assert.equal((await statusOf(mockExt, ctx))[0]?.state, "stopped");
