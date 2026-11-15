@@ -7,7 +7,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
-- Idle servers are now stopped automatically: a `ready` server with no tool use for 10 agent turns is shut down through the `/mcp:stop` recipe (deliberate stop, no reconnect, tools unloaded), and the new `mcp_disconnect` agent tool lets the model unload a server itself (sequential, so it never cuts a parallel call to the same server). Idle state is per session. A server started again after a stop (`/mcp:start`, `/mcp:auth`, `mcp_connect`) gets the full 10 turns again. Eager servers obey the same rule and stay stopped until `mcp_connect` or a new session.
+- Servers are now stopped automatically after a long silence in the thread: when a prompt arrives after more than 1 hour without any activity in the session (`before_agent_start`, `turn_start`, `turn_end`, `agent_end`, any `tool_call`), every `ready` server is shut down through the `/mcp:stop` recipe (deliberate stop, no reconnect, tools unloaded). While the thread is being worked on nothing is stopped, however long a server goes unused: unloading tools mid-work would invalidate the provider's prompt cache, and after an hour of silence that cache has expired anyway. The new `mcp_disconnect` agent tool lets the model unload a server itself (sequential, so it never cuts a parallel call to the same server). Activity is tracked per session; a brand-new session stops nothing. Eager servers obey the same rule and stay stopped until `mcp_connect` or a new session.
 
 ## [1.12.4] - 2026-11-04
 

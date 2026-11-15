@@ -54,11 +54,8 @@ import {
 import { CallbackServer } from "./callback-server.js";
 import {
   createIdleStopState,
-  recordSeen,
-  recordTurn,
-  recordUse,
-  forgetServer,
-  selectIdleServers,
+  isThreadIdle,
+  recordActivity,
 } from "./idle-stop.js";
 import { authorize as runAuthorize } from "./authorize-flow.js";
 import {
@@ -78,16 +75,7 @@ export {
 
 const DEFAULT_SETTINGS = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 } as const;
 
-/** Best-effort string field of a tool_call input (unknown shape is "not used"). */
-function inputString(input: unknown, key: string): string {
-  if (typeof input !== "object" || input === null) {
-    return "";
-  }
-  const raw = (input as Record<string, unknown>)[key];
-  return typeof raw === "string" ? raw : "";
-}
-
-export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string; globalConfigPath?: string; authStorageDir?: string; browserOpen?: (url: string) => void | Promise<void>; callbackServer?: CallbackServer } = {}): Promise<void> {
+export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string; globalConfigPath?: string; authStorageDir?: string; browserOpen?: (url: string) => void | Promise<void>; callbackServer?: CallbackServer; now?: () => number } = {}): Promise<void> {
   // ── 0. Opt-in diagnostic log ───────────────────────────────────────────────
   // WHY: The debug log is created before anything else so bootstrap failures
   // are captured too. The file is only touched when the first event is written.
@@ -186,9 +174,6 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
   manager.setServerStoppedCallback((name) => {
     bridge.deactivateServer(name);
     resources.forget(name);
-    // WHY: a server started again (/mcp:start, /mcp:auth) must get a fresh first sight,
-    // not its stale last use — otherwise it is stopped again on the next turn.
-    forgetServer(idle, name);
   });
   manager.setRecoveryFailedCallback((serverName, error) => {
     coordinator.handleRecoveryFailed(serverName, error);
@@ -385,33 +370,38 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
     await getDebugLog()?.flush();
   });
 
-  // ── 3b. Idle eviction of unused servers ──────────────────────────────────
+  // ── 3b. Idle eviction after a long silence in the thread ─────────────────
   // WHY: a connected server costs context on every request and, for stdio, a
-  // live process tree. Turns and usage are per session (pi loads extensions per
-  // session runtime). Stopping goes through the same recipe as /mcp:stop, which
-  // marks the stop deliberate — no _recover() respawn. Eager servers obey the
-  // same rule and stay stopped until mcp_connect or a new session.
-  pi.on("tool_call", (event) => {
-    const name = event.toolName;
-    if (name === "mcp_connect" || name === "mcp_read_resource") {
-      recordUse(idle, inputString(event.input, name === "mcp_connect" ? "name" : "server"));
-      return undefined;
-    }
-    const owner = bridge.getServerForTool(name);
-    if (owner !== null) {
-      recordUse(idle, owner);
-    }
+  // live process tree — but unloading its tools mid-work invalidates the
+  // provider's prompt cache. So nothing is stopped while the thread is active;
+  // only a prompt that arrives after more than IDLE_STOP_MS without any session
+  // activity (the cache has expired by then) stops every ready server. Activity
+  // is per session (pi loads extensions per session runtime). Stopping goes
+  // through the same recipe as /mcp:stop, which marks the stop deliberate — no
+  // _recover() respawn. Eager servers obey the same rule and stay stopped until
+  // mcp_connect or a new session.
+  const now = paths.now ?? Date.now;
+  const touch = (): undefined => {
+    recordActivity(idle, now());
     return undefined;
-  });
+  };
+  pi.on("turn_start", touch);
+  pi.on("turn_end", touch);
+  pi.on("agent_end", touch);
+  pi.on("tool_call", touch);
   pi.on("before_agent_start", async (_event, ctx) => {
-    recordTurn(idle);
-    const ready = manager.getReadyServers().map((server) => server.name);
-    recordSeen(idle, ready);
-    for (const name of selectIdleServers(idle, ready)) {
-      coordinator.cancelServer(name);
+    const at = now();
+    const stale = isThreadIdle(idle, at);
+    // WHY: record before the awaits below, so the stops themselves never read as silence.
+    recordActivity(idle, at);
+    if (!stale) {
+      return;
+    }
+    for (const server of manager.getReadyServers()) {
+      coordinator.cancelServer(server.name);
       coordinator.syncStatus(ctx);
-      bridge.deactivateServer(name);
-      await manager.stopServer(name);
+      bridge.deactivateServer(server.name);
+      await manager.stopServer(server.name);
     }
   });
 
