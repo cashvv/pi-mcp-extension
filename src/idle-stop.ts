@@ -1,69 +1,46 @@
 /**
- * Idle eviction of MCP servers: pure turn/use tracking and the stop decision.
+ * Idle eviction of MCP servers: pure thread-activity tracking and the stop decision.
  *
  * A connected server costs context on every request (its tool definitions) and,
- * for stdio servers, a live process tree. When the model stops using a server,
- * neither should linger: after {@link IDLE_STOP_TURNS} turns without a single
- * use, the wiring in `src/index.ts` stops the server through the same recipe as
- * `/mcp:stop` (`cancelServer` + `deactivateServer` + `manager.stopServer`), so
- * the state machine marks the stop deliberate — no `_recover()` respawn.
+ * for stdio servers, a live process tree. But removing tools in the middle of
+ * work changes the request prefix and invalidates the provider's prompt cache,
+ * so the next request goes out uncached. Servers are therefore never stopped
+ * while the thread is being worked on, however long one of them goes unused.
+ * Only when a prompt arrives after more than {@link IDLE_STOP_MS} without any
+ * activity in the session — by then the prompt cache has expired anyway — does
+ * the wiring in `src/index.ts` stop every ready server through the same recipe
+ * as `/mcp:stop` (`cancelServer` + `deactivateServer` + `manager.stopServer`),
+ * so the state machine marks the stop deliberate — no `_recover()` respawn.
  *
  * pi loads extensions per session runtime (`moduleCache: false`), so each
  * session has its own manager, server processes and idle state.
  *
  * Rules:
- * - a turn is one `before_agent_start` of this session (a user prompt);
- * - a use is any `tool_call` of the server's tools, `mcp_connect` (its `name`
- *   input), or `mcp_read_resource` (its `server` input);
- * - servers whose tools appear without a recorded use count as used at first
- *   sight (eager starts and `/mcp:start` never pass through `mcp_connect`);
- * - a server that is not `ready` at a turn is forgotten, so a server started
- *   again after a stop (`/mcp:start`, `/mcp:auth`, lazy reconnect) gets a fresh
- *   first sight instead of its stale last use;
- * - only `ready` servers are stopped; `starting`/`stopped` are left alone.
+ * - activity is any `before_agent_start`, `turn_start`, `turn_end`, `agent_end`
+ *   or `tool_call` of this session; the wiring passes the time of each one;
+ * - the decision is taken only on `before_agent_start` (a user prompt), before
+ *   that prompt is recorded as activity;
+ * - a session with no recorded activity (brand new) is never idle;
+ * - exactly {@link IDLE_STOP_MS} of silence is not idle yet, more is.
+ *
+ * The clock is injected by the caller: nothing here reads the time itself.
  */
-export const IDLE_STOP_TURNS = 10;
+export const IDLE_STOP_MS = 60 * 60 * 1000;
 
 export interface IdleStopState {
-  turn: number;
-  lastUsed: Map<string, number>;
+  /** Time (ms) of the last activity in the session; `null` until the first one. */
+  lastActivityAt: number | null;
 }
 
 export function createIdleStopState(): IdleStopState {
-  return { turn: 0, lastUsed: new Map() };
+  return { lastActivityAt: null };
 }
 
-export function recordTurn(state: IdleStopState): void {
-  state.turn += 1;
+export function recordActivity(state: IdleStopState, now: number): void {
+  state.lastActivityAt = now;
 }
 
-export function recordUse(state: IdleStopState, server: string): void {
-  if (server.length > 0) {
-    state.lastUsed.set(server, state.turn);
-  }
-}
-
-export function recordSeen(state: IdleStopState, servers: readonly string[]): void {
-  for (const known of [...state.lastUsed.keys()]) {
-    if (!servers.includes(known)) state.lastUsed.delete(known);
-  }
-  for (const server of servers) {
-    if (!state.lastUsed.has(server)) {
-      state.lastUsed.set(server, state.turn);
-    }
-  }
-}
-
-/** A stopped server (any path: idle, /mcp:stop, mcp_disconnect, shutdown) loses its last use. */
-export function forgetServer(state: IdleStopState, server: string): void {
-  state.lastUsed.delete(server);
-}
-
-export function selectIdleServers(
-  state: IdleStopState,
-  readyServers: readonly string[],
-): string[] {
-  return readyServers.filter(
-    (server) => state.turn - (state.lastUsed.get(server) ?? state.turn) > IDLE_STOP_TURNS,
-  );
+/** True when the session had activity before and more than {@link IDLE_STOP_MS} passed since the last one. */
+export function isThreadIdle(state: IdleStopState, now: number): boolean {
+  return state.lastActivityAt !== null && now - state.lastActivityAt > IDLE_STOP_MS;
 }

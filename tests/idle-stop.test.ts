@@ -1,9 +1,11 @@
 /**
- * Idle eviction of unused MCP servers + mcp_disconnect (CAS-523).
+ * Idle eviction of MCP servers after a long silence in the thread (CAS-1618,
+ * replaces the per-server turn counting of CAS-523) + mcp_disconnect.
  *
- * Pure decision logic is tested directly; the wiring (tool_call / turn
- * counting / stop recipe) is tested through a full extension load against the
- * mock stdio server, the same way tests/management-tools.test.ts does it.
+ * Pure decision logic is tested directly; the wiring (activity events / stop
+ * recipe) is tested through a full extension load against the mock stdio
+ * server with an injected clock, the same way tests/management-tools.test.ts
+ * loads the extension.
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -12,82 +14,46 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import extension from "../src/index.js";
-import {
-  createIdleStopState,
-  recordSeen,
-  recordTurn,
-  recordUse,
-  selectIdleServers,
-  IDLE_STOP_TURNS,
-} from "../src/idle-stop.js";
+import { createIdleStopState, isThreadIdle, recordActivity, IDLE_STOP_MS } from "../src/idle-stop.js";
 import { createMockExtension, createMockContext, type MockExtension } from "./helpers/mock-extension.js";
 
 describe("idle-stop decision", () => {
-  it("stops after 10 idle turns, keeps on the boundary", () => {
-    assert.equal(IDLE_STOP_TURNS, 10);
-    const state = createIdleStopState();
-    recordUse(state, "github");
-    for (let turn = 1; turn <= 10; turn += 1) {
-      recordTurn(state);
-      assert.deepEqual(selectIdleServers(state, ["github"]), [], `turn ${turn}`);
-    }
-    recordTurn(state);
-    assert.deepEqual(selectIdleServers(state, ["github"]), ["github"]);
+  it("is one hour", () => {
+    assert.equal(IDLE_STOP_MS, 60 * 60 * 1000);
   });
 
-  it("use resets the counter, servers are independent", () => {
+  it("a brand-new session is never idle", () => {
     const state = createIdleStopState();
-    recordSeen(state, ["github", "playwright"]);
-    for (let index = 0; index < 5; index += 1) {
-      recordTurn(state);
-    }
-    recordUse(state, "github");
-    for (let index = 0; index < 6; index += 1) {
-      recordTurn(state);
-    }
-    assert.deepEqual(selectIdleServers(state, ["github", "playwright"]), ["playwright"]);
+    assert.equal(isThreadIdle(state, 0), false);
+    assert.equal(isThreadIdle(state, 100 * IDLE_STOP_MS), false);
   });
 
-  it("first sight counts as use, unknown names are kept verbatim", () => {
+  it("is idle only after more than an hour since the last activity", () => {
     const state = createIdleStopState();
-    recordTurn(state);
-    recordSeen(state, ["lazy"]);
-    recordUse(state, "");
-    assert.deepEqual(selectIdleServers(state, ["lazy"]), []);
-    for (let index = 0; index < 10; index += 1) {
-      recordTurn(state);
-    }
-    assert.deepEqual(selectIdleServers(state, ["lazy"]), []);
-    recordTurn(state);
-    assert.deepEqual(selectIdleServers(state, ["lazy"]), ["lazy"]);
+    recordActivity(state, 1_000);
+    assert.equal(isThreadIdle(state, 1_000), false);
+    assert.equal(isThreadIdle(state, 1_000 + IDLE_STOP_MS - 1), false);
+    assert.equal(isThreadIdle(state, 1_000 + IDLE_STOP_MS), false, "boundary");
+    assert.equal(isThreadIdle(state, 1_000 + IDLE_STOP_MS + 1), true);
   });
 
-  it("a server that left ready is forgotten and gets a fresh first sight", () => {
+  it("any later activity restarts the hour", () => {
     const state = createIdleStopState();
-    recordSeen(state, ["github"]);
-    for (let index = 0; index < 11; index += 1) {
-      recordTurn(state);
-    }
-    assert.deepEqual(selectIdleServers(state, ["github"]), ["github"]);
-    // stopped: not ready at the next turn
-    recordTurn(state);
-    recordSeen(state, []);
-    // started again without a tool call (/mcp:start, /mcp:auth)
-    recordTurn(state);
-    recordSeen(state, ["github"]);
-    for (let index = 0; index < 10; index += 1) {
-      recordTurn(state);
-      assert.deepEqual(selectIdleServers(state, ["github"]), [], `turn ${index}`);
-    }
-    recordTurn(state);
-    assert.deepEqual(selectIdleServers(state, ["github"]), ["github"]);
+    recordActivity(state, 0);
+    recordActivity(state, IDLE_STOP_MS);
+    assert.equal(isThreadIdle(state, 2 * IDLE_STOP_MS), false);
+    assert.equal(isThreadIdle(state, 2 * IDLE_STOP_MS + 1), true);
   });
 });
 
 const mockServer = join(dirname(fileURLToPath(import.meta.url)), "mock-server.ts");
 const tsxEsmLoader = import.meta.resolve("tsx/esm");
 
-async function loadWithLazyServer(dir: string) {
+interface Clock {
+  now: number;
+}
+
+async function loadWithLazyServer(dir: string, clock: Clock = { now: 1_700_000_000_000 }) {
   const mockExt = createMockExtension();
   const ctx = createMockContext({ cwd: dir, hasUI: false });
   await mkdir(join(dir, ".pi"));
@@ -98,9 +64,13 @@ async function loadWithLazyServer(dir: string) {
       mcpServers: { lazy: { command: "node", args: ["--import", tsxEsmLoader, mockServer], lifecycle: "lazy" } },
     }),
   );
-  await extension(mockExt.api, { bootstrapCwd: dir, globalConfigPath: join(dir, "absent-global.json") });
+  await extension(mockExt.api, {
+    bootstrapCwd: dir,
+    globalConfigPath: join(dir, "absent-global.json"),
+    now: () => clock.now,
+  });
   await mockExt.events.get("session_start")({}, ctx);
-  return { mockExt, ctx };
+  return { mockExt, ctx, clock };
 }
 
 type StatusRow = { name: string; state: string; tools: { discovered: number; active: number } };
@@ -110,77 +80,102 @@ async function statusOf(mockExt: MockExtension, ctx: unknown): Promise<StatusRow
   return JSON.parse(raw.content[0].text) as StatusRow[];
 }
 
-async function turns(mockExt: MockExtension, ctx: unknown, count: number): Promise<void> {
-  const handler = mockExt.events.get("before_agent_start");
-  for (let index = 0; index < count; index += 1) {
-    await handler({}, ctx);
+async function prompt(mockExt: MockExtension, ctx: unknown): Promise<void> {
+  await mockExt.events.get("before_agent_start")({}, ctx);
+}
+
+async function connectLazy(mockExt: MockExtension, ctx: unknown): Promise<void> {
+  await mockExt.tools.get("mcp_connect").execute("", { name: "lazy" }, undefined, undefined, ctx);
+}
+
+async function withLazyServer(
+  prefix: string,
+  run: (loaded: Awaited<ReturnType<typeof loadWithLazyServer>>) => Promise<void>,
+): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  const loaded = await loadWithLazyServer(dir);
+  try {
+    await run(loaded);
+  } finally {
+    await loaded.mockExt.events.get("session_shutdown")?.({}, loaded.ctx);
+    await rm(dir, { recursive: true, force: true });
   }
 }
 
 describe("idle eviction wiring", () => {
-  it("stops a server idle for 10 turns and keeps a used one", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "pi-mcp-idle-"));
-    const { mockExt, ctx } = await loadWithLazyServer(dir);
-    try {
+  it("never stops an unused server while the thread is active, however many turns pass", async () => {
+    await withLazyServer("pi-mcp-idle-active-", async ({ mockExt, ctx, clock }) => {
       assert.ok(mockExt.tools.has("mcp_disconnect"));
-      await mockExt.tools.get("mcp_connect").execute("", { name: "lazy" }, undefined, undefined, ctx);
-      const useTool = mockExt.events.get("tool_call");
-      await useTool({ toolName: "mcp_lazy_echo", input: { message: "hi" } }, ctx);
-      await turns(mockExt, ctx, 10);
-      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
-      await turns(mockExt, ctx, 1);
+      await connectLazy(mockExt, ctx);
+      // 30 prompts, 59 minutes apart, none of them using the server: far more
+      // than the old 10-turn limit and 29 hours of wall time, but never a full
+      // hour of silence.
+      for (let turn = 0; turn < 30; turn += 1) {
+        await prompt(mockExt, ctx);
+        clock.now += IDLE_STOP_MS - 60_000;
+      }
+      const row = (await statusOf(mockExt, ctx))[0];
+      assert.equal(row?.state, "ready");
+      assert.ok((row?.tools.active ?? 0) > 0);
+    });
+  });
+
+  it("stops all ready servers on the first prompt after more than an hour of silence", async () => {
+    await withLazyServer("pi-mcp-idle-stale-", async ({ mockExt, ctx, clock }) => {
+      await connectLazy(mockExt, ctx);
+      await prompt(mockExt, ctx);
+      clock.now += IDLE_STOP_MS;
+      await prompt(mockExt, ctx);
+      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready", "exactly one hour is not idle");
+      clock.now += IDLE_STOP_MS + 1;
+      await prompt(mockExt, ctx);
       const after = await statusOf(mockExt, ctx);
       assert.equal(after[0]?.state, "stopped");
       assert.ok((after[0]?.tools.discovered ?? 0) > 0);
       assert.equal(after[0]?.tools.active, 0);
       assert.ok(!mockExt.activeTools.some((name) => name.startsWith("mcp_lazy_")));
-    } finally {
-      await mockExt.events.get("session_shutdown")?.({}, ctx);
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
-  it("mcp_connect and mcp_read_resource count as use", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "pi-mcp-idle-use-"));
-    const { mockExt, ctx } = await loadWithLazyServer(dir);
-    try {
-      await mockExt.tools.get("mcp_connect").execute("", { name: "lazy" }, undefined, undefined, ctx);
-      const useTool = mockExt.events.get("tool_call");
-      await turns(mockExt, ctx, 5);
-      await useTool({ toolName: "mcp_connect", input: { name: "lazy" } }, ctx);
-      await turns(mockExt, ctx, 10);
+  it("a brand-new session stops nothing on its first prompt", async () => {
+    await withLazyServer("pi-mcp-idle-new-", async ({ mockExt, ctx, clock }) => {
+      // like /mcp:start before the first prompt: no activity event recorded yet
+      await connectLazy(mockExt, ctx);
+      clock.now += 5 * IDLE_STOP_MS;
+      await prompt(mockExt, ctx);
       assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
-      await useTool({ toolName: "mcp_read_resource", input: { server: "lazy", uri: "mock://docs/readme" } }, ctx);
-      await turns(mockExt, ctx, 10);
-      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
-      await turns(mockExt, ctx, 1);
-      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "stopped");
-    } finally {
-      await mockExt.events.get("session_shutdown")?.({}, ctx);
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 
-  it("a server started again after an idle stop gets 10 more turns", async () => {
-    const dir = await mkdtemp(join(tmpdir(), "pi-mcp-idle-restart-"));
-    const { mockExt, ctx } = await loadWithLazyServer(dir);
-    try {
-      const connect = () => mockExt.tools.get("mcp_connect").execute("", { name: "lazy" }, undefined, undefined, ctx);
-      await connect();
-      await turns(mockExt, ctx, 12);
+  for (const event of ["turn_start", "turn_end", "agent_end", "tool_call"]) {
+    it(`${event} counts as activity`, async () => {
+      await withLazyServer("pi-mcp-idle-activity-", async ({ mockExt, ctx, clock }) => {
+        await connectLazy(mockExt, ctx);
+        await prompt(mockExt, ctx);
+        // a long agent run: the last event comes 50 minutes after the prompt
+        clock.now += 50 * 60_000;
+        await mockExt.events.get(event)({ toolName: "bash", input: {} }, ctx);
+        clock.now += 50 * 60_000;
+        await prompt(mockExt, ctx);
+        assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
+      });
+    });
+  }
+
+  it("a server reconnected after an idle stop stays while the thread is active", async () => {
+    await withLazyServer("pi-mcp-idle-restart-", async ({ mockExt, ctx, clock }) => {
+      await connectLazy(mockExt, ctx);
+      await prompt(mockExt, ctx);
+      clock.now += IDLE_STOP_MS + 1;
+      await prompt(mockExt, ctx);
       assert.equal((await statusOf(mockExt, ctx))[0]?.state, "stopped");
-      // like /mcp:start: no tool_call event reaches the idle counter
-      await connect();
+      await connectLazy(mockExt, ctx);
+      for (let turn = 0; turn < 12; turn += 1) {
+        clock.now += 60_000;
+        await prompt(mockExt, ctx);
+      }
       assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
-      // the first turn that sees it again counts as its use, then 10 idle turns
-      await turns(mockExt, ctx, 11);
-      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "ready");
-      await turns(mockExt, ctx, 1);
-      assert.equal((await statusOf(mockExt, ctx))[0]?.state, "stopped");
-    } finally {
-      await mockExt.events.get("session_shutdown")?.({}, ctx);
-      await rm(dir, { recursive: true, force: true });
-    }
+    });
   });
 });
 
