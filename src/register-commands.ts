@@ -44,6 +44,10 @@ async function buildServerDetail(server: ManagedServer, deps: RegisterCommandsDe
     tools: deps.bridge.getToolActivity(serverName),
     source: lookupServerSource(provenance, serverName),
     recentOutput: manager.getServerLogs(serverName),
+    timeouts: {
+      requestMs: manager.resolveRequestTimeoutMs(server),
+      toolMs: manager.resolveToolTimeoutMs(server),
+    },
     readAuthStatus: (name) => manager.getServerAuthStatus(name),
   });
   return formatServerDetail(snapshot, provenance);

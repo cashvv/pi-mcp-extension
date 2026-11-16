@@ -18,6 +18,7 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { McpError, AuthCancelledError } from "./errors.js";
 import type { Settings } from "./config.js";
+import { DEFAULT_TOOL_TIMEOUT_MS } from "./config.js";
 import { isCancellationError, isOAuthUnauthorizedError, isSdkTimeoutError } from "./connect-policy.js";
 import { convertJsonSchemaToTypebox } from "./schema-convert.js";
 import { listAllTools, type McpToolDefinition } from "./tool-discovery.js";
@@ -30,6 +31,8 @@ export type PiExtensionAPI = Pick<ExtensionAPI, "registerTool" | "getActiveTools
 
 export type ToolRefreshOptions = {
   requestTimeoutMs?: number | undefined;
+  /** Timeout for one `tools/call`; defaults to the session setting, then ten minutes. */
+  toolTimeoutMs?: number | undefined;
   signal?: AbortSignal | undefined;
 };
 
@@ -258,6 +261,8 @@ export class ToolBridge {
   private readonly refreshGenerations = new Map<string, number>();
   /** Per-server request timeout overrides resolved during refreshTools. */
   private readonly serverTimeouts = new Map<string, number>();
+  /** Per-server `tools/call` timeout overrides resolved during refreshTools. */
+  private readonly serverToolTimeouts = new Map<string, number>();
   private onAuthError?: ((serverName: string, error: unknown) => Promise<void> | void) | undefined;
 
   constructor(settings: Settings, pi: PiExtensionAPI) {
@@ -273,10 +278,25 @@ export class ToolBridge {
   /** Update bridge settings when session config is reloaded on session_start. */
   updateSettings(settings: Settings): void {
     const prevDefaultTimeoutMs = this.settings.requestTimeoutMs;
+    const prevDefaultToolTimeoutMs = this._defaultToolTimeoutMs();
     this.settings = settings;
-    for (const [serverName, timeoutMs] of this.serverTimeouts.entries()) {
-      if (timeoutMs === prevDefaultTimeoutMs) {
-        this.serverTimeouts.delete(serverName);
+    this._dropDefaultOverrides(this.serverTimeouts, prevDefaultTimeoutMs);
+    this._dropDefaultOverrides(this.serverToolTimeouts, prevDefaultToolTimeoutMs);
+  }
+
+  /** Effective default `tools/call` timeout: the settings value, else ten minutes. */
+  private _defaultToolTimeoutMs(): number {
+    return this.settings.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
+  }
+
+  /**
+   * Forget the recorded overrides that were just the old session default, so a reload
+   * that changes the default takes effect on servers that never set their own value.
+   */
+  private _dropDefaultOverrides(map: Map<string, number>, previousDefaultMs: number): void {
+    for (const [serverName, timeoutMs] of map.entries()) {
+      if (timeoutMs === previousDefaultMs) {
+        map.delete(serverName);
       }
     }
   }
@@ -296,6 +316,7 @@ export class ToolBridge {
   ): Promise<void> {
     const { isCurrent, options } = normalizeRefreshArgs(isCurrentOrOptions, maybeOptions);
     const effectiveTimeoutMs = this._recordServerTimeout(serverName, options?.requestTimeoutMs);
+    this._recordServerToolTimeout(serverName, options?.toolTimeoutMs);
     const gen = this._bumpRefreshGeneration(serverName);
 
     const tools = await this._fetchToolsForServer(
@@ -333,6 +354,7 @@ export class ToolBridge {
   removeServerTools(serverName: string): void {
     this._bumpRefreshGeneration(serverName);
     this.serverTimeouts.delete(serverName);
+    this.serverToolTimeouts.delete(serverName);
     this._deactivateServerTools(serverName);
     const existing = this.serverToolNames.get(serverName);
     if (existing) {
@@ -370,6 +392,20 @@ export class ToolBridge {
       this.serverTimeouts.delete(serverName);
     }
     return explicitTimeoutMs ?? this.settings.requestTimeoutMs;
+  }
+
+  /** Record (or clear) the per-server `tools/call` timeout override. */
+  private _recordServerToolTimeout(serverName: string, explicitTimeoutMs: number | undefined): void {
+    if (explicitTimeoutMs !== undefined) {
+      this.serverToolTimeouts.set(serverName, explicitTimeoutMs);
+    } else {
+      this.serverToolTimeouts.delete(serverName);
+    }
+  }
+
+  /** Effective `tools/call` timeout for one server: override, session setting, ten minutes. */
+  private _toolTimeoutMs(serverName: string): number {
+    return this.serverToolTimeouts.get(serverName) ?? this._defaultToolTimeoutMs();
   }
 
   /**
@@ -551,7 +587,7 @@ export class ToolBridge {
         client,
         toolName,
         params,
-        this.serverTimeouts.get(serverName) ?? this.settings.requestTimeoutMs,
+        this._toolTimeoutMs(serverName),
         signal,
       );
     } catch (err) {

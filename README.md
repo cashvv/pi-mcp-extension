@@ -94,7 +94,8 @@ See also [`examples/mcp.json.example`](./examples/mcp.json.example) for a copy-r
 {
   "settings": {
     "toolPrefix": "mcp",         // Tools appear as mcp_<server>_<tool> (default: "mcp")
-    "requestTimeoutMs": 30000,   // Per-request timeout in ms (default: 30000)
+    "requestTimeoutMs": 30000,   // Connect/ping/tools-list timeout in ms (default: 30000)
+    "toolTimeoutMs": 600000,     // One tools/call may run this long (default: 600000)
     "maxRetries": 5              // Max reconnection attempts, 0-10 (default: 5)
   },
   "mcpServers": {
@@ -167,7 +168,13 @@ In project-level `.pi/mcp.json`, `settings` keys carry no defaults — only the 
 |---|---|---|---|
 | `toolPrefix` | `string` | `"mcp"` | Prefix for registered tools: `<prefix>_<server>_<tool>`. Must match `^[a-zA-Z][a-zA-Z0-9_]*$`. |
 | `requestTimeoutMs` | `number` | `30000` | Default per-request timeout in milliseconds |
+| `toolTimeoutMs` | `number` | `600000` | Default timeout for one `tools/call`, in milliseconds |
 | `maxRetries` | `number` | `5` | Max reconnection attempts (0–10) before giving up |
+
+`requestTimeoutMs` bounds the connection work — `initialize`, `ping`, `tools/list` and OAuth
+requests — and stays short so a dead server fails fast. A tool is long-running by nature (a
+170 MB file send takes about a minute), so `tools/call` uses its own, larger budget:
+`toolTimeoutMs`. Cancelling the call (`Esc`, aborted signal) still ends it earlier.
 
 ### Per-Server Config
 
@@ -193,6 +200,7 @@ For Pi 1.x / 1.3.0 compatibility, server entries also accept:
 | `lifecycle` | `"eager" \| "lazy"` | `"lazy"` (`"eager"` for `pi.registerMcpServer()` unless `enabled: false`) | `eager` = auto-start on `session_start`, `lazy` = connect on request via `mcp_connect`, `/mcp:start`, or `/mcp:auth` |
 | `enabled` | `boolean` | `true` | Pi 1.3.0 switch: `false` keeps the entry configured but out of the eager set (normalized to `lifecycle: "lazy"`, even when `lifecycle: "eager"` is also set) |
 | `requestTimeoutMs` (or `timeout`) | `number` | global setting | Per-server timeout override in ms (`timeout` is specified in seconds and multiplied by `1000`) |
+| `toolTimeoutMs` (or `toolTimeout`) | `number` | global setting | Per-server `tools/call` timeout override in ms (`toolTimeout` is specified in seconds and multiplied by `1000`) |
 | `healthCheckIntervalMs` | `number` | disabled | Opt-in ping interval in ms for proactive connection health monitoring |
 
 ### Project Override Entries
@@ -275,6 +283,7 @@ Transport: streamable-http
 Lifecycle: lazy
 Source: global
 Tools: 0/0 active
+Timeouts: request 30s / tool 600s
 OAuth: credentials stored
 Last error: Connection timed out after 30000ms
 Hint: run with PI_MCP_DEBUG=1 pi to log redacted diagnostics, or report server issues at https://github.com/irahardianto/pi-mcp-extension/issues
@@ -286,6 +295,7 @@ Recent output:
 - `Source` is the entry that won: `global` (`<agent dir>/mcp.json`), `project` (`<cwd>/.pi/mcp.json`), or `extension` (`pi.registerMcpServer()`). `mcp_status` reports the same value as `source` on each row (or `"unknown"` if unrecorded).
 - When the project is untrusted, `Source` never says `project` and a `Project config: not loaded (<path>)` line explains why `mcp.json` in the workspace is not in effect.
 - `Tools` compares discovered tools with the ones Pi has active; a server can be `ready` with `0/N active` when another extension restricts tools.
+- `Timeouts` shows the two budgets in effect: the request timeout (connect, ping, `tools/list`) and the `tools/call` timeout. A call that ends at the tool timeout is reported as a timeout, not as a server failure.
 - `OAuth` appears only for servers with an `auth` config: `credentials stored`, `authorization may be required`, or `corrupt state file backed up (re-auth required)` (the corrupt file is backed up and the view still renders; `mcp_status` reports `"not configured"` when `auth` is unset).
 - A failed server adds one `Hint:` line: `/mcp:auth <name>` (plus `--reset` when stored credentials expired) for a missing/expired authorization, waiting for another Pi process holding the auth lock, or `PI_MCP_DEBUG=1 pi` plus the issue tracker for a connection failure.
 

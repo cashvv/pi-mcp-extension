@@ -246,8 +246,7 @@ describe("ServerManager integration (stdio)", () => {
 });
 
 describe("ServerManager — unknown server", () => {
-  it("throws McpError for unknown server name", async () => {
-    const manager = new ServerManager({ settings: { toolPrefix: "mcp", requestTimeoutMs: 5000, maxRetries: 0 }, mcpServers: {} });
+  it("throws McpError for unknown server name", async () => {    const manager = new ServerManager({ settings: { toolPrefix: "mcp", requestTimeoutMs: 5000, maxRetries: 0 }, mcpServers: {} });
     await assert.rejects(
       () => manager.startServer("nonexistent", "/tmp"),
       (err: unknown) => {
@@ -256,6 +255,31 @@ describe("ServerManager — unknown server", () => {
         return true;
       },
     );
+  });
+});
+
+describe("tools/call keeps its own timeout (CAS-1638)", () => {
+  it("resolves the tool timeout from the server, then the session setting, then ten minutes", () => {
+    const config = makeMockConfig({
+      settings: { toolPrefix: "mcp", requestTimeoutMs: 5000, maxRetries: 0, toolTimeoutMs: 120000 },
+      mcpServers: {
+        own: { command: "node", args: [], transport: "stdio", lifecycle: "lazy", toolTimeoutMs: 9000 },
+        inherited: { command: "node", args: [], transport: "stdio", lifecycle: "lazy" },
+      },
+    });
+    const manager = new ServerManager(config);
+    assert.equal(manager.resolveToolTimeoutMs(manager.getServer("own")!), 9000);
+    assert.equal(manager.resolveToolTimeoutMs(manager.getServer("inherited")!), 120000);
+    // The request timeout is untouched by the tool budget.
+    assert.equal(manager.resolveRequestTimeoutMs(manager.getServer("own")!), 5000);
+  });
+
+  it("falls back to ten minutes when neither the server nor the settings state a tool timeout", () => {
+    const config = makeMockConfig({
+      mcpServers: { bare: { command: "node", args: [], transport: "stdio", lifecycle: "lazy" } },
+    });
+    const manager = new ServerManager(config);
+    assert.equal(manager.resolveToolTimeoutMs(manager.getServer("bare")!), 600000);
   });
 });
 
@@ -274,6 +298,7 @@ describe("Batch 2 — Issues #19, #20, #21", () => {
           transport: "stdio",
           lifecycle: "lazy",
           requestTimeoutMs: 1234,
+          toolTimeoutMs: 4321,
         },
       },
     });
@@ -314,7 +339,9 @@ describe("Batch 2 — Issues #19, #20, #21", () => {
       const echoTool = mockPi.tools.find((t) => t.name.includes("echo"));
       assert.ok(echoTool);
       await echoTool.execute("call-1", { message: "timeout-check" }, undefined, () => {}, {});
-      assert.equal(callToolTimeout, 1234);
+      // WHY: a tool call keeps its own, longer budget (CAS-1638) while discovery stays on
+      // the short request timeout, so a slow file send no longer dies at 30 s.
+      assert.equal(callToolTimeout, 4321);
 
       // Trigger notifications/tools/list_changed and verify explicit options are passed on re-discovery too
       await (client as unknown as { _onnotification: (msg: unknown) => Promise<void> })._onnotification({

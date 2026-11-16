@@ -8,6 +8,7 @@
   "settings": {
     "toolPrefix": "mcp",
     "requestTimeoutMs": 30000,
+    "toolTimeoutMs": 600000,
     "maxRetries": 5
   },
   "mcpServers": {
