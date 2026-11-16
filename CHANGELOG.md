@@ -7,6 +7,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- A `tools/call` now has its own timeout budget instead of sharing the connection one. `requestTimeoutMs` (default `30000`) keeps bounding `initialize`, `ping`, `tools/list` and OAuth requests so a dead server fails fast, while `toolTimeoutMs` (default `600000`, per-server override or the `toolTimeout` seconds alias) bounds one tool call — a 170 MB file send through a Telegram MCP server takes about a minute and used to fail with `-32001 Request timed out` while the server was still working. Cancelling the call still ends it earlier, and `/mcp <name>` now prints both budgets as a `Timeouts:` line.
 - Idle servers are now stopped automatically: a `ready` server with no tool use for 10 agent turns is shut down through the `/mcp:stop` recipe (deliberate stop, no reconnect, tools unloaded), and the new `mcp_disconnect` agent tool lets the model unload a server itself (sequential, so it never cuts a parallel call to the same server). Idle state is per session. A server started again after a stop (`/mcp:start`, `/mcp:auth`, `mcp_connect`) gets the full 10 turns again. Eager servers obey the same rule and stay stopped until `mcp_connect` or a new session.
 
 ## [1.12.4] - 2026-11-04

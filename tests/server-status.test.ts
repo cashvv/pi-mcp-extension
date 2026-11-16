@@ -203,6 +203,16 @@ describe("formatServerDetail", () => {
     assert.doesNotMatch(detail, /^OAuth:/m);
     assert.doesNotMatch(detail, /^Last error:/m);
     assert.doesNotMatch(detail, /^Hint:/m);
+    // No timeouts were resolved by this caller, so no Timeouts line is invented.
+    assert.doesNotMatch(detail, /^Timeouts:/m);
+  });
+
+  it("shows the request and tools/call timeouts when the caller resolves them (CAS-1638)", () => {
+    const detail = formatServerDetail(
+      snapshot({ name: "telegram", state: "ready", timeouts: { requestMs: 30000, toolMs: 600000 } }),
+      withExtensionServers(provenanceInput(), []),
+    );
+    assert.match(detail, /^Timeouts: request 30s \/ tool 600s$/m);
   });
 
   it("adds OAuth, last error, hint, and the skipped-project note for a failed untrusted server", () => {

@@ -15,6 +15,7 @@ import type {
 import { join } from "node:path";
 import {
   agentDir,
+  DEFAULT_TOOL_TIMEOUT_MS,
   loadConfigWithOrigins,
   type LoadedConfig,
   type McpConfig,
@@ -169,6 +170,13 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
       options?.requestTimeoutMs ??
       server?.config.requestTimeoutMs ??
       config.settings.requestTimeoutMs;
+    // WHY: tools/call has its own budget — a file send legitimately runs for a minute,
+    // while a dead connection must still fail after the short request timeout (CAS-1638).
+    // The manager already resolved it from the server; the fallback only covers a callback
+    // that arrives without a server (e.g. config removed mid-refresh).
+    const toolTimeoutMs =
+      options?.toolTimeoutMs ??
+      (server ? manager.resolveToolTimeoutMs(server) : config.settings.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS);
     await bridge.refreshTools(
       serverName,
       client,
@@ -179,6 +187,7 @@ export default async function (pi: ExtensionAPI, paths: { bootstrapCwd?: string;
       {
         ...options,
         requestTimeoutMs,
+        toolTimeoutMs,
       },
     );
   });

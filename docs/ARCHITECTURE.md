@@ -377,12 +377,14 @@ Behavior:
   and ignored here). An override with any other key, or for a name no global file
   defines, is a config error naming the file and the server.
 - **Pi 1.x aliases** are normalized before validation: `type` → `transport`, `"http"` →
-  `"streamable-http"`, `oauth` → `auth`, `timeout` (seconds) → `requestTimeoutMs`, and
-  `enabled: false` → `lifecycle: "lazy"` (a disabled server never joins the eager set,
-  even when `lifecycle` says `eager`). Defaults: `transport` is `stdio` (or
-  `streamable-http` when `url` is set), `lifecycle` is `lazy` (eager for
-  extension-registered servers unless `enabled: false`), `toolPrefix` is `mcp`,
-  `requestTimeoutMs` is `30000`, and `maxRetries` is `5`.
+  `"streamable-http"`, `oauth` → `auth`, `timeout` (seconds) → `requestTimeoutMs`,
+  `toolTimeout` (seconds) → `toolTimeoutMs`, and`enabled: false` → `lifecycle: "lazy"`
+  (a disabled server never joins the eager set, even when `lifecycle` says `eager`).
+  Defaults: `transport` is `stdio` (or `streamable-http` when `url` is set), `lifecycle` is
+  `lazy` (eager for extension-registered servers unless `enabled: false`), `toolPrefix` is
+  `mcp`, `requestTimeoutMs` is `30000`, and `maxRetries` is `5`. `toolTimeoutMs` carries no
+  config default: it resolves to the server's value, then the session setting, then
+  `600000` when a `tools/call` runs — the request timeout never bounds a tool call.
 - **Load-time validation.** `toolPrefix` must match `^[a-zA-Z][a-zA-Z0-9_]*$`; `auth` is
   rejected on `stdio`; `auth.provider` (Pi's `/login` provider token, which this
   extension cannot forward) is rejected instead of being silently downgraded to OAuth;
