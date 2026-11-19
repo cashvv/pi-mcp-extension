@@ -401,6 +401,30 @@ describe("loadConfig with PI_CODING_AGENT_DIR", () => {
     });
   });
 
+  it("keeps the tools/call timeout per server, as settings, and through the toolTimeout (seconds) alias", async () => {
+    await withAgentDir(async (agent, cwd) => {
+      await writeFile(
+        join(agent, "mcp.json"),
+        JSON.stringify({
+          settings: { toolTimeoutMs: 90000 },
+          mcpServers: {
+            viaMs: { url: "https://example.com/mcp", toolTimeoutMs: 120000 },
+            viaSeconds: { url: "https://example.com/mcp", toolTimeout: 45 },
+            plain: { url: "https://example.com/mcp" },
+          },
+        }),
+      );
+      const cfg = await loadConfigFile(cwd);
+      assert.equal(cfg.settings.toolTimeoutMs, 90000);
+      assert.equal(cfg.mcpServers["viaMs"]?.toolTimeoutMs, 120000);
+      assert.equal(cfg.mcpServers["viaSeconds"]?.toolTimeoutMs, 45000);
+      // No default is materialized: the effective value is resolved at call time, so a
+      // config that never mentions the tool timeout stays byte-identical.
+      assert.equal(cfg.mcpServers["plain"]?.toolTimeoutMs, undefined);
+      assert.equal(cfg.settings.requestTimeoutMs, 30000);
+    });
+  });
+
   it("rejects an invalid project setting", async () => {
     await withAgentDir(async (_agent, cwd) => {
       await writeMcpJson(cwd, { settings: { toolPrefix: "bad prefix" } });

@@ -24,7 +24,7 @@ import {
   LoggingMessageNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { McpError, AuthCancelledError } from "./errors.js";
-import type { McpConfig, ServerConfig, Settings } from "./config.js";
+import { DEFAULT_TOOL_TIMEOUT_MS, type McpConfig, type ServerConfig, type Settings } from "./config.js";
 import { AuthRequiredError, getAuthStatus, resetAuth, invalidateStoredTokens } from "./oauth-provider.js";
 import type { ToolRefreshOptions } from "./tool-bridge.js";
 import { sanitizeTerminalText, type SanitizeTerminalTextOptions } from "./terminal-text.js";
@@ -260,6 +260,14 @@ export class ServerManager {
   /** Effective request timeout for a server: its own override, else the session default. */
   resolveRequestTimeoutMs(server: ManagedServer): number {
     return server.config.requestTimeoutMs ?? this.settings.requestTimeoutMs;
+  }
+
+  /**
+   * Effective `tools/call` timeout for a server: its own override, else the session
+   * default, else ten minutes. Connect and discovery keep `resolveRequestTimeoutMs`.
+   */
+  resolveToolTimeoutMs(server: ManagedServer): number {
+    return server.config.toolTimeoutMs ?? this.settings.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS;
   }
 
   /**
@@ -654,6 +662,7 @@ export class ServerManager {
       const refreshTimeoutMs = this.resolveRequestTimeoutMs(server);
       await onToolRefresh(server.name, server.client, {
         requestTimeoutMs: refreshTimeoutMs,
+        toolTimeoutMs: this.resolveToolTimeoutMs(server),
         signal,
       });
     } catch (err) {
@@ -701,6 +710,7 @@ export class ServerManager {
     if (this.onToolRefresh) {
       await this.onToolRefresh(server.name, client, {
         requestTimeoutMs: timeoutMs,
+        toolTimeoutMs: this.resolveToolTimeoutMs(server),
         signal,
       });
     }

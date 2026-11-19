@@ -147,13 +147,29 @@ function normalizeTimeoutAlias(obj: Record<string, unknown>): void {
   obj.requestTimeoutMs = obj.timeout * 1000;
 }
 
-/** Rewrite Pi 1.x config aliases (`type`, `oauth`, `timeout`, `enabled`) before schema validation. */
+/**
+ * Map the `toolTimeout` (seconds) alias onto `toolTimeoutMs` (milliseconds): the
+ * per-server counterpart of `timeout`, so both budgets can be written in the seconds
+ * the Pi 1.x config format used.
+ */
+function normalizeToolTimeoutAlias(obj: Record<string, unknown>): void {
+  if (obj.toolTimeoutMs !== undefined) {
+    return;
+  }
+  if (typeof obj.toolTimeout !== "number" || obj.toolTimeout <= 0) {
+    return;
+  }
+  obj.toolTimeoutMs = obj.toolTimeout * 1000;
+}
+
+/** Rewrite Pi 1.x config aliases (`type`, `oauth`, `timeout`, `toolTimeout`, `enabled`) before schema validation. */
 function normalizeServerConfigAliases(raw: unknown): unknown {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
   const obj = { ...(raw as Record<string, unknown>) };
   normalizeTransportAlias(obj);
   normalizeAuthAlias(obj);
   normalizeTimeoutAlias(obj);
+  normalizeToolTimeoutAlias(obj);
   normalizeEnabledAlias(obj);
   return obj;
 }
@@ -212,6 +228,13 @@ export const ServerConfigSchema = z.preprocess(
       /** Per-request timeout in ms. Overrides global setting. Default: 30000. */
       requestTimeoutMs: z.number().positive().optional(),
       /**
+       * Timeout for one `tools/call` in ms. Overrides the global setting. Default: 600000.
+       * Only tool calls use it: connect, handshake, ping and tools/list keep
+       * `requestTimeoutMs`, because a tool is long-running by nature (a 170 MB file send
+       * takes about a minute) while a dead connection must fail fast.
+       */
+      toolTimeoutMs: z.number().positive().optional(),
+      /**
        * Opt-in heartbeat interval (ping) in ms.
        * Only useful for long-lived connections where you want proactive liveness checks.
        * Default: disabled.
@@ -257,6 +280,14 @@ const DEFAULT_SETTINGS = {
   maxRetries: 5,
 } as const;
 
+/**
+ * Effective `tools/call` timeout when neither the server nor the settings state one:
+ * ten minutes. A tool call is the only request whose duration is bounded by the work
+ * itself rather than by a connection, so it must not inherit the 30 s request timeout
+ * (CAS-1638). Cancellation by the caller still ends it earlier.
+ */
+export const DEFAULT_TOOL_TIMEOUT_MS = 600_000;
+
 const SettingsSchema = z.object({
   /**
    * Prefix used in Pi tool names: <prefix>_<server>_<tool>.
@@ -268,6 +299,8 @@ const SettingsSchema = z.object({
     .default(DEFAULT_SETTINGS.toolPrefix),
   /** Default per-request timeout in ms for all servers. Default: 30000. */
   requestTimeoutMs: z.number().positive().default(DEFAULT_SETTINGS.requestTimeoutMs),
+  /** Default `tools/call` timeout in ms for all servers. Default: 600000. */
+  toolTimeoutMs: z.number().positive().optional(),
   /** Maximum retry attempts when a server fails to connect. Default: 5. */
   maxRetries: z.number().int().min(0).max(10).default(DEFAULT_SETTINGS.maxRetries),
 });
@@ -288,6 +321,7 @@ const ProjectSettingsSchema = z.object({
     .regex(/^[a-zA-Z][a-zA-Z0-9_]*$/, "toolPrefix must start with a letter and contain only alphanumeric characters and underscores")
     .optional(),
   requestTimeoutMs: z.number().positive().optional(),
+  toolTimeoutMs: z.number().positive().optional(),
   maxRetries: z.number().int().min(0).max(10).optional(),
 });
 const ProjectConfigSchema = z.object({

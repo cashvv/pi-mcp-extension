@@ -1483,15 +1483,15 @@ it("should perform full teardown on session_start config reload or config load f
     await events.get("session_start")({}, ctx3);
     assert.ok(activeTools.includes("p3_stdio3_echo"), `Expected p3_stdio3_echo, got: ${activeTools.join(", ")}`);
 
-    // Also verify ToolBridge.updateSettings updates tool-call timeouts for servers using global default
-    // while preserving explicit per-server requestTimeoutMs overrides
+    // Also verify ToolBridge.updateSettings refreshes the tools/call timeout for servers on the
+    // global default while an explicit per-server toolTimeoutMs keeps its own value (CAS-1638)
     const unitPiTools = createStrictMap<string, ToolDefinition>();
     const unitPi = makeBridgeApi(
       (t: ToolDefinition) => unitPiTools.set(t.name, t),
       () => [],
       () => {},
     );
-    const initialSettings = { toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 0 };
+    const initialSettings = { toolPrefix: "mcp", requestTimeoutMs: 30000, toolTimeoutMs: 30000, maxRetries: 0 };
     const unitManager = new ServerManager({
       settings: initialSettings,
       mcpServers: {
@@ -1507,6 +1507,7 @@ it("should perform full teardown on session_start config reload or config load f
           command: "node",
           args: ["--import", tsxEsmLoader, mockServer],
           requestTimeoutMs: 1234,
+          toolTimeoutMs: 4321,
         },
       },
     });
@@ -1516,7 +1517,7 @@ it("should perform full teardown on session_start config reload or config load f
       await unitManager.startServer("defaultTimeoutSrv", cwd3);
       await unitManager.startServer("explicitTimeoutSrv", cwd3);
 
-      unitBridge.updateSettings({ toolPrefix: "mcp", requestTimeoutMs: 7777, maxRetries: 0 });
+      unitBridge.updateSettings({ toolPrefix: "mcp", requestTimeoutMs: 7777, toolTimeoutMs: 8888, maxRetries: 0 });
 
       const defaultClient = unitManager.getServer("defaultTimeoutSrv")!.client!;
       let defaultCallTimeout: number | undefined;
@@ -1545,8 +1546,8 @@ it("should perform full teardown on session_start config reload or config load f
       await unitPiTools.get("mcp_defaultTimeoutSrv_echo").execute("1", { message: "a" }, undefined, () => {}, ctx3);
       await unitPiTools.get("mcp_explicitTimeoutSrv_echo").execute("2", { message: "b" }, undefined, () => {}, ctx3);
 
-      assert.equal(defaultCallTimeout, 7777, "Server without explicit requestTimeoutMs must use updated settings.requestTimeoutMs");
-      assert.equal(explicitCallTimeout, 1234, "Server with explicit requestTimeoutMs must retain its per-server timeout");
+      assert.equal(defaultCallTimeout, 8888, "Server without an explicit toolTimeoutMs must use the updated settings.toolTimeoutMs");
+      assert.equal(explicitCallTimeout, 4321, "Server with an explicit toolTimeoutMs must retain its per-server timeout");
     } finally {
       await unitManager.shutdownAll();
     }

@@ -38,6 +38,11 @@ export interface ServerStatusSnapshot {
   lastError: Error | null;
   /** Recent sanitized stderr output, or the caller's "(no stderr output)" note. */
   recentOutput: string;
+  /**
+   * Effective request and `tools/call` timeouts, when the caller knows them. The detail
+   * view prints them: a tool failing at N seconds is a timeout question first (CAS-1638).
+   */
+  timeouts?: { requestMs: number; toolMs: number } | undefined;
 }
 
 export interface ServerStatusRow {
@@ -55,6 +60,8 @@ export interface CollectServerStatusParams {
   tools: { discovered: number; active: number };
   source: ServerConfigSource | undefined;
   recentOutput?: string | undefined;
+  /** Effective request and `tools/call` timeouts, when the caller resolves them. */
+  timeouts?: { requestMs: number; toolMs: number } | undefined;
   /** Reads stored OAuth state for a server; injected so tests avoid disk I/O. */
   readAuthStatus: (serverName: string) => Promise<StoredAuthStatus | null>;
 }
@@ -111,6 +118,17 @@ function isDefined(value: string | undefined): value is string {
   return value !== undefined;
 }
 
+/** Render one millisecond budget the way the detail view shows it: `30s`, `600s`. */
+function formatTimeoutMs(ms: number): string {
+  return `${Math.round(ms / 1000)}s`;
+}
+
+/** `Timeouts:` line of the detail view, or undefined when the caller did not resolve them. */
+function formatTimeouts(timeouts: ServerStatusSnapshot["timeouts"]): string | undefined {
+  if (timeouts === undefined) return undefined;
+  return `Timeouts: request ${formatTimeoutMs(timeouts.requestMs)} / tool ${formatTimeoutMs(timeouts.toolMs)}`;
+}
+
 /** `/mcp <name>` detail view: config provenance, tool counts, credentials, and next steps. */
 export function formatServerDetail(snapshot: ServerStatusSnapshot, provenance: ConfigProvenance): string {
   const lines: Array<string | undefined> = [
@@ -121,6 +139,7 @@ export function formatServerDetail(snapshot: ServerStatusSnapshot, provenance: C
     `Lifecycle: ${snapshot.lifecycle}`,
     `Source: ${formatServerSource(snapshot.source)}`,
     `Tools: ${snapshot.tools.active}/${snapshot.tools.discovered} active`,
+    formatTimeouts(snapshot.timeouts),
     snapshot.auth === undefined ? undefined : `OAuth: ${snapshot.auth}`,
     formatProjectConfigNote(provenance),
     // WHY: a connect/stream failure usually quotes the request URL, and that URL can carry a
@@ -182,5 +201,6 @@ export async function collectServerStatus(params: CollectServerStatusParams): Pr
     auth: await summarizeAuth(params),
     lastError: server.lastError,
     recentOutput: params.recentOutput ?? "",
+    ...(params.timeouts === undefined ? {} : { timeouts: params.timeouts }),
   };
 }

@@ -1207,6 +1207,46 @@ describe("ToolBridge", () => {
     assert.deepEqual(bridge.getToolActivity("unknown"), { discovered: 0, active: 0 });
   });
 
+  it("keeps the tools/call timeout apart from the request timeout (CAS-1638)", async () => {
+    const registeredTools: TestToolDefinition[] = [];
+    let activeTools: string[] = [];
+
+    const mockPi = {
+      registerTool: (t: unknown) => registeredTools.push(t as TestToolDefinition),
+      getAllTools: () => registeredTools.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters, sourceInfo: { path: "test", line: 0 } })),
+      getActiveTools: () => activeTools,
+      setActiveTools: (names: string[]) => { activeTools = names; },
+    };
+
+    let listTimeout: number | undefined;
+    let callTimeout: number | undefined;
+    const mockClient = {
+      request: async (req: { method?: string }, _schema: unknown, options?: { timeout?: number }) => {
+        if (req.method === "tools/list") listTimeout = options?.timeout;
+        return {
+          tools: [{
+            name: "echo",
+            description: "Echo tool",
+            inputSchema: { type: "object", properties: {} },
+          }],
+        };
+      },
+      callTool: async (_params: unknown, _schema: unknown, options?: { timeout?: number }) => {
+        callTimeout = options?.timeout;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+    } as unknown as Client;
+
+    const bridge = new ToolBridge({ toolPrefix: "mcp", requestTimeoutMs: 30000, maxRetries: 5 }, mockPi);
+    await bridge.refreshTools("myserver", mockClient, { requestTimeoutMs: 1234, toolTimeoutMs: 4321 });
+    assert.equal(listTimeout, 1234);
+
+    const tool = registeredTools[0];
+    assert.ok(tool);
+    await tool.execute("call-1", {}, undefined, undefined, undefined);
+    assert.equal(callTimeout, 4321);
+  });
+
   it("deactivates server tools on disconnect", async () => {
     const registeredTools: TestToolDefinition[] = [];
     let activeTools: string[] = ["mcp_myserver_echo", "mcp_myserver_count", "other_tool"];
